@@ -16676,6 +16676,45 @@ test "Terminal: resize less cols without reflow cutting wide char tail" {
     try testing.expect(t.screens.active.pages.getCell(.{ .active = .{ .x = 1 } }).?.cell.isEmpty());
 }
 
+test "Terminal: resize less cols does not wrap trailing background erase" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    // Programs like delta paint a whole line by setting a background,
+    // printing, and erasing to the end of the line (EL), which fills the
+    // rest of the line with background-only cells.
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice("\x1b[41mfoo\x1b[K\x1b[0m\r\nbar");
+    }
+
+    try t.resize(alloc, .{ .cols = 5, .rows = 3 });
+
+    // The background-only cells past the new width are trimmed, not
+    // soft-wrapped onto a new row.
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("foo\nbar", str);
+    }
+
+    const pages = &t.screens.active.pages;
+    try testing.expect(!pages.getCell(.{ .active = .{ .y = 0 } }).?.row.wrap);
+
+    // The background-only cells that still fit are kept.
+    for (3..5) |x| {
+        const cell = pages.getCell(.{ .active = .{
+            .x = @intCast(x),
+            .y = 0,
+        } }).?.cell;
+        try testing.expectEqual(.bg_color_palette, cell.content_tag);
+        try testing.expectEqual(1, cell.content.color_palette.data);
+    }
+}
+
 // https://github.com/mitchellh/ghostty/issues/723
 // This was found via fuzzing so its highly specific.
 test "Terminal: resize with left and right margin set" {
