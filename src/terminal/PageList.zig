@@ -1676,6 +1676,23 @@ const ReflowCursor = struct {
             if (cols_len == 0 and src_row.semantic_prompt != .none) cols_len = 1;
         }
 
+        // Find where the row's trailing background-only cells start. These
+        // are left by erasing with a background color set (e.g. `CSI K`),
+        // which programs like delta use to paint a line's background to the
+        // edge of the screen. They fill the row rather than being content,
+        // so below we never soft-wrap only to continue them on a new row.
+        // This matches Terminal.app. A wrapped row has more content after
+        // it, so its cells are all meaningful.
+        var fill_start = cols_len;
+        if (!src_row.wrap) {
+            while (fill_start > 0) {
+                switch (cells[fill_start - 1].content_tag) {
+                    .bg_color_palette, .bg_color_rgb => fill_start -= 1,
+                    .codepoint, .codepoint_grapheme => break,
+                }
+            }
+        }
+
         // Handle tracked pin adjustments. We also note whether any
         // tracked pin is on this row at all so that the per-cell loop
         // below can skip pin scans entirely for the overwhelmingly
@@ -1709,6 +1726,7 @@ const ReflowCursor = struct {
                 // This ensures that blank rows with pins are processed,
                 // so that the pins can be properly remapped.
                 cols_len = @max(cols_len, p.x + 1);
+                fill_start = @max(fill_start, p.x + 1);
             }
         }
 
@@ -1717,6 +1735,7 @@ const ReflowCursor = struct {
         if (cursor_pin) |p| {
             if (p.node == row.node and p.y == src_y) {
                 cols_len = @max(cols_len, p.x + 1);
+                fill_start = @max(fill_start, p.x + 1);
             }
         }
 
@@ -1754,6 +1773,10 @@ const ReflowCursor = struct {
         var x: usize = 0;
         while (x < cols_len) {
             if (self.pending_wrap) {
+                // Only background-only cells are left, so drop them
+                // rather than wrapping. See fill_start.
+                if (x >= fill_start) break;
+
                 self.page_row.wrap = true;
                 try self.cursorScrollOrNewPage(list, cap);
                 self.copyRowMetadata(src_row);
