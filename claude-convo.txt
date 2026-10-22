@@ -1,0 +1,704 @@
+ ▐▛███▛█   Claude Code v2.1.304
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   ~/Code/others/ghostty
+
+
+❯ I don't know if this is "spec compliant" or not, but Terminal.app and a
+  pre-1.0 Ghostty used to have this nice behavior (that was leveraged by the
+  delta diff tool) where if you set a background color and then cleared to the
+  end of the line (or something close to that), then you'd get the background
+  color applied to the full line no matter the terminal width. like, if you
+  grew the terminal width, the background color would extend, and if you shrank
+  the terminal width (so it's narrower than when delta produced its output) it
+  would get trimmed nicely. so it's like the background color didn't have a
+  width, it was like it was a property of the line.
+
+  currently ghostty does not have this behavior: from the user's perspective,
+  it seems to ignore this nice property that delta tries to achieve with the
+  escape codes it emits, and instead seemingly assigns a background color per
+  cell rather than per line, and does not extend or trim. this results in
+  background colors wrapping in an unpleasant way.
+
+  another claude looked into it and claimed this:
+
+  - Ghostty's old terminal code handled this case on purpose.
+  trimRowForResizeLessCols (979dc5a43, 2023-03-01) dropped trailing cells that
+  had style but no character once they fell past the new width, with the
+  comment "this is just an empty-character stylized cell, then we trim it".
+  That clip-instead-of-wrap behavior is what you remember, and it matches
+  Terminal.app.
+    > - The terminal rewrite added isEmpty() with background cells counted as
+  content (1d3057750, 2024-02-27). The current trimming logic arrived in
+  8589f2c0f (2024-07-08). The old implementation, trimming included, was
+  deleted in a416d4236 (2024-03-26).
+
+  I'd like you to
+  1. figure out where the relevant code is in the codebase today
+  2. write a failing unit test that exercises this behavior
+  3. see if you can come up with a fix that makes the test pass
+  4. explain it to me
+
+  it's possible that this was an intentional change. a code comment in that
+  older Ghostty commit seems to indicate the author was aware of the
+  Terminal.app behavior but not confident whether it was "compliant". but there
+  is no official spec for terminal emulators, just de jure standards, so I
+  can't point you at a definitive resource.
+
+  if you have any questions don't hesistate to pause and ask me. don't do silly
+  workarounds to avoid stopping and asking for help.
+
+  you are temporarily allowed to use jj to author commits for this work. I
+  think you should at least have a commit for the steps I outlined above, but
+  if you feel strongly about adding more commits, that's okay too.
+
+  when authoring a fix, you need to make sure it's very easy to review and very
+  obviously understandable and correct. if the fix is non-trivial, it's likely
+  you will want to structure it in a sequence of multiple commits, where each
+  commit is self-evidently correct and almost trivial to review. each commit
+  does not need to compile or be formatted, if it failing to compile or not
+  being formatted (e.g. whitespace) is in service of an easier review.
+
+  I am not a maintainer of this project, I am but a humble user who would like
+  to file an informed, correct, respectful bug report. so it's very important
+  that we both gain a solid understanding of the mechanism at play, whether the
+  "bug" should be fixed or not, and why the fix works and makes sense.
+
+  Searched for 3 patterns, ran 2 shell commands (ctrl+o to expand)
+
+⏺ I've traced the reflow logic to ReflowCursor.reflowRow in
+  src/terminal/PageList.zig, and noted that Cell.isEmpty() counts cells with
+  only a background color as content. Next I'll check how an erase operation
+  with a background color writes cells.
+
+  Searched for 2 patterns, ran 4 shell commands (ctrl+o to expand)
+
+⏺ Found something important in the old code: a growing-columns "extend
+  background" behavior existed but was commented out because "it broke some
+  programs." Tracking down when and why.
+
+  Searched for 1 pattern, ran 13 shell commands (ctrl+o to expand)
+
+⏺ Web Search("ghostty delta background color resize wrap line github
+            discussion")
+  ⎿  Did 1 search in 6s
+
+⏺ Web Search("ghostty resize trailing background color cells reflow erase line")
+  ⎿  Did 1 search in 8s
+
+❯ it would also be helpful if, in your git history archeology, you found any
+  relevant issues or PRs that I could look into and either 1) reference in my
+  new issue, or 2) follow up on / participate in
+
+⏺ Checking the git history around that August 2023 commit to see if it
+  references a related issue or PR.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+⏺ I'll hand the GitHub issue and discussion search to a background agent while I
+  write the test.
+
+⏺ Agent(Find related Ghostty issues/discussions)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Searched for 2 patterns, ran 3 shell commands (ctrl+o to expand)
+
+⏺ Checking resizeCols for fast paths that skip reflow, since my fix needs to
+  stop reflow from creating a new wrapped row just to hold trailing
+  background-only cells left by an erase-with-background.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Writing the test now, in src/terminal/Terminal.zig next to the existing resize
+  tests. It feeds in the same escape sequences delta emits.
+
+⏺ Update(src/terminal/Terminal.zig)
+  ⎿  Added 39 lines
+      16676      try testing.expect(t.screens.active.pages.getCell(.{ .ac
+             tive = .{ .x = 1 } }).?.cell.isEmpty());
+      16677  }
+      16678
+      16679 +test "Terminal: resize less cols does not wrap trailing back
+            +ground erase" {
+      16680 +    const alloc = testing.allocator;
+      16681 +    const io_impl = testing.io;
+      16682 +    var t = try init(io_impl, alloc, .{ .cols = 10, .rows =
+            +3 });
+      16683 +    defer t.deinit(alloc);
+      16684 +
+      16685 +    // Programs like delta paint a whole line by setting a b
+            +ackground,
+      16686 +    // printing, and erasing to the end of the line (EL), wh
+            +ich fills the
+      16687 +    // rest of the line with background-only cells.
+      16688 +    {
+      16689 +        var s = t.vtStream();
+      16690 +        defer s.deinit();
+      16691 +        s.nextSlice("\x1b[41mfoo\x1b[K\x1b[0m\r\nbar");
+      16692 +    }
+      16693 +
+      16694 +    try t.resize(alloc, .{ .cols = 5, .rows = 3 });
+      16695 +
+      16696 +    // The background-only cells past the new width are trim
+            +med, not
+      16697 +    // soft-wrapped onto a new row.
+      16698 +    {
+      16699 +        const str = try t.plainString(alloc);
+      16700 +        defer alloc.free(str);
+      16701 +        try testing.expectEqualStrings("foo\nbar", str);
+      16702 +    }
+      16703 +
+      16704 +    const pages = &t.screens.active.pages;
+      16705 +    try testing.expect(!pages.getCell(.{ .active = .{ .y = 0
+            + } }).?.row.wrap);
+      16706 +
+      16707 +    // The background-only cells that still fit are kept.
+      16708 +    for (3..5) |x| {
+      16709 +        const cell = pages.getCell(.{ .active = .{
+      16710 +            .x = @intCast(x),
+      16711 +            .y = 0,
+      16712 +        } }).?.cell;
+      16713 +        try testing.expectEqual(.bg_color_palette, cell.cont
+            +ent_tag);
+      16714 +        try testing.expectEqual(1, cell.content.color_palett
+            +e);
+      16715 +    }
+      16716 +}
+      16717 +
+      16718  // https://github.com/mitchellh/ghostty/issues/723
+      16719  // This was found via fuzzing so its highly specific.
+      16720  test "Terminal: resize with left and right margin set" {
+
+  Ran 1 shell command (ctrl+o to expand)
+
+❯ Here is a note offered by a side agent:
+
+  > Heads up · The two behaviors you remember were separate in old Ghostty, and
+  the "extend when wider" one was removed on purpose in 2023.
+  >
+  > Old Ghostty removed "extend when wider" on purpose
+  > - You described two behaviors: trimming the background color when the
+  window gets narrower, and extending it when the window gets wider.
+  > - Old Ghostty did both for a few months in 2023. In August 2023 the
+  maintainer turned off extending (commit 3352cae3f). The code comment says it
+  "broke some programs" but doesn't say which ones.
+  > - Trimming stayed until the 2024 terminal rewrite, then quietly went away.
+  Its test was the only resize test that wasn't carried over to the new code.
+  > - Old trimming also threw the colored cells away. Making the window
+  narrower and then wider again would not bring the color back.
+  > - In your bug report, consider asking only for trimming. Asking for
+  extending would mean asking the maintainer to undo a choice they made
+  deliberately.
+
+⏺ This confirms the issue, so I'll scope the fix to trimming only. Since the
+  full build requires Xcode's metal tool (not available here), I'll switch to
+  the libghostty-vt test target, which still covers src/terminal.
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+⏺ Bash(sed -i '' 's/try testing.expectEqual(1, cell.content.color_palette);/try
+      testing.expectEqual(1, cell.content.color_palette.data);/'
+      src/terminal/Terminal.zig &&…)
+  ⎿         ======== instead found this: =========
+            foo
+     … +24 lines (ctrl+o to expand)
+  ⎿  Updated src/terminal/Terminal.zig (+1 -1)
+      16711              .y = 0,
+      16712          } }).?.cell;
+      16713          try testing.expectEqual(.bg_color_palette, cell.cont
+             ent_tag);
+      16714 -        try testing.expectEqual(1, cell.content.color_palett
+            -e);
+      16714 +        try testing.expectEqual(1, cell.content.color_palett
+            +e.data);
+      16715      }
+      16716  }
+      16717
+  ⎿  (timeout 10m)
+
+⏺ The test fails as expected—shrinking from 10 to 5 columns leaves 5 leftover
+  cells soft-wrapped into an extra blank row. I'll commit this failing test now.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Now the fix, in ReflowCursor.reflowRow:
+
+⏺ Update(src/terminal/PageList.zig)
+  ⎿  Added 17 lines
+      1676              if (cols_len == 0 and src_row.semantic_prompt !=
+            .none) cols_len = 1;
+      1677          }
+      1678
+      1679 +        // Find where the row's trailing background-only cell
+           +s start. These
+      1680 +        // are left by erasing with a background color set (e
+           +.g. `CSI K`),
+      1681 +        // which programs like delta use to paint a line's ba
+           +ckground to the
+      1682 +        // edge of the screen. They fill the row rather than
+           +being content,
+      1683 +        // so below we never soft-wrap only to continue them
+           +on a new row.
+      1684 +        // This matches Terminal.app. A wrapped row has more
+           +content after
+      1685 +        // it, so its cells are all meaningful.
+      1686 +        var fill_start = cols_len;
+      1687 +        if (!src_row.wrap) {
+      1688 +            while (fill_start > 0) {
+      1689 +                switch (cells[fill_start - 1].content_tag) {
+      1690 +                    .bg_color_palette, .bg_color_rgb => fill_
+           +start -= 1,
+      1691 +                    .codepoint, .codepoint_grapheme => break,
+      1692 +                }
+      1693 +            }
+      1694 +        }
+      1695 +
+      1696          // Handle tracked pin adjustments. We also note wheth
+            er any
+      1697          // tracked pin is on this row at all so that the per-
+            cell loop
+      1698          // below can skip pin scans entirely for the overwhel
+            mingly
+
+⏺ Update(src/terminal/PageList.zig)
+  ⎿  Added 2 lines
+      1726                  // This ensures that blank rows with pins are
+             processed,
+      1727                  // so that the pins can be properly remapped.
+      1728                  cols_len = @max(cols_len, p.x + 1);
+      1729 +                fill_start = @max(fill_start, p.x + 1);
+      1730              }
+      1731          }
+      1732
+     ...
+      1735          if (cursor_pin) |p| {
+      1736              if (p.node == row.node and p.y == src_y) {
+      1737                  cols_len = @max(cols_len, p.x + 1);
+      1738 +                fill_start = @max(fill_start, p.x + 1);
+      1739              }
+      1740          }
+      1741
+
+⏺ Update(src/terminal/PageList.zig)
+  ⎿  Added 4 lines
+      1773          var x: usize = 0;
+      1774          while (x < cols_len) {
+      1775              if (self.pending_wrap) {
+      1776 +                // Only background-only cells are left, so dr
+           +op them
+      1777 +                // rather than wrapping. See fill_start.
+      1778 +                if (x >= fill_start) break;
+      1779 +
+      1780                  self.page_row.wrap = true;
+      1781                  try self.cursorScrollOrNewPage(list, cap);
+      1782                  self.copyRowMetadata(src_row);
+
+  Ran 1 shell command (ctrl+o to expand)
+⏺ The new test passes. Next I'm running the whole libghostty-vt suite to check
+  for regressions, since reflow touches a lot of tests.
+
+⏺ Bash(time zig build test-lib-vt 2>&1 | grep -v "^failed command" | tail -30;
+      echo "exit=${pipestatus[1]}")
+  ⎿  zig build test-lib-vt 2>&1  910.92s user 6.94s system 195% cpu 7:49.01
+      total
+     grep -v "^failed command"  0.00s user 0.00s system 0% cpu 7:49.01 tota
+     … +3 lines (ctrl+o to expand)
+  ⎿  (another command ran in this repository at the same time; a change
+     made by either may show under either result)
+  ⎿  (timeout 10m)
+
+› Message from general-purpose
+  ## Bottom line
+  I found no Ghostty issue, discussion or PR that reports delta (or any
+  EL-painted background) soft-wrapping when the window is narrowed. I also found
+  nothing public that says which programs broke and led to commit 3352cae3f.
+
+  GitHub's discussion search does not work well without logging in. Several
+  result pages failed to load or showed only pinned items, so a Ghostty report
+  may exist that I couldn't see. A logged-in search of Discussions for "delta",
+  "reflow" and "wrap" before filing would close that gap.
+
+  ## Contribution process (confirmed)
+  Bugs go to an **"Issue Triage" Discussion**, not to an Issue. Sources:
+  https://github.com/ghostty-org/ghostty/blob/main/CONTRIBUTING.md, and the same
+  file in the local repo at
+  /Users/evanrelf/Code/others/ghostty/CONTRIBUTING.md.
+  - "If your issue hasn't been reported already, open an ["Issue Triage"]
+  discussion and make sure to fill in the template **completely**." The link is
+  https://github.com/ghostty-org/ghostty/discussions/new?category=issue-triage
+  - "Ghostty **does not use the issue tracker for discussion or feature
+  requests** … Once a discussion reaches a point where a well-understood,
+  actionable item is identified, it is moved to the issue tracker."
+  - It warns against filing bugs as Q&A or Feature Requests.
+  - PRs should implement an issue that was already accepted. First-time
+  contributors need a "Vouch Request" discussion approved before they can open
+  PRs; otherwise "any pull requests you open will be automatically closed."
+  - Pinned discussion rules:
+  https://github.com/ghostty-org/ghostty/discussions/6937
+
+  ## Directly relevant
+  1. **ghostty-org/ghostty PR #83, "Resize Fixes"** (merged 2023-03-02):
+  https://github.com/ghostty-org/ghostty/pull/83
+     - This is where the old behaviour came from. It contains "screen: when
+  expanding cols, broadcast empty styled cells" (31ac3ec7b) and "screen: don't
+  wrap empty-char stylized cells on shrinking cols" (9a4a138da).
+     - The PR has no write-up explaining either change. Its only stated
+  reference terminal is Terminal.app, and that is in a different commit about
+  trimming rows.
+     - Follow-up PR #84 (https://github.com/ghostty-org/ghostty/pull/84) and
+  issue #76, "Resize is pretty much fully buggy"
+  (https://github.com/ghostty-org/ghostty/issues/76, closed 2023-03-02), don't
+  discuss styled cells.
+  2. **Commit 3352cae3f** (2023-08-30) was pushed straight to main, not through
+  a PR, with no linked issue.
+     - I checked every issue and PR created between 2023-08-20 and 2023-09-02.
+  Nothing mentions resize plus trailing background. Look-alikes #359 (tab
+  stops), #362 (SGR 48 parsing) and #374 (nvim in tmux) turned out to be
+  unrelated.
+     - The "broke some programs" reports were probably made privately (the repo
+  was private beta then, likely via Discord) and aren't on GitHub.
+  3. **dandavison/delta #155, "Allow configuration of underline width"** (closed
+  2020-06-01): https://github.com/dandavison/delta/issues/155
+     - Opened by evanrelf. The complaint was content wrapping when the terminal
+  is narrowed.
+     - dandavison proposed replacing space padding with the ANSI fill so
+  backgrounds follow the terminal edge.
+  4. **dandavison/delta #115, "Diff highlighting overflows onto the next line"**
+  (closed 2020-05-20): https://github.com/dandavison/delta/issues/115
+     - This is where delta switched from padding with spaces to EL ("Erase in
+  Line… fill rightwards with the current color"), via PR #165. It also sets
+  `LESSANSIENDCHARS=mK`.
+  5. **dandavison/delta PR #512, "Option to set the background extension mode to
+  ANSI or spaces"** (merged 2021-09-19):
+  https://github.com/dandavison/delta/pull/512
+     - This added `--line-fill-method`. th1000s says space padding "ruins
+  terminal resizing/shrinking."
+     - **Correction to your context:** delta's help text says `line-fill-method`
+  is "Line-fill method in side-by-side mode." It does nothing for unified
+  diffs, which always use EL. Help text:
+  https://dandavison.github.io/delta/full---help-output.html
+  6. **dandavison/delta #1021, "Clear to EOL, the loss of the last character, &
+  empty-line highlighting"** (open, 2022-03-20):
+  https://github.com/dandavison/delta/issues/1021
+     - th1000s confirms unified mode can't use spaces because delta doesn't know
+  the width there.
+     - He also says the ANSI/EL approach "is also nice when resizing the
+  terminal." That is a maintainer statement that delta counts on the terminal
+  behaving well with EL-filled cells on resize.
+
+  ## Tangential
+  - **ghostty-org/ghostty Discussion #12497, "[Bug] Background color bleeds on
+  soft-wrapped lines after scroll"** (Issue Triage, closed and answered
+  2026-04-28): https://github.com/ghostty-org/ghostty/discussions/12497
+    - This is about BCE on scroll, not reflow.
+    - pluiedev described Ghostty's order of precedence: spec, then kitty, then
+  xterm, then common practice. Ghostty matches xterm here, so he saw no reason
+  to change it.
+    - It led to issue #12505, which makes Ghostty report DECECM as permanently
+  reset (closed 2026-08-05 via PR #12660):
+  https://github.com/ghostty-org/ghostty/issues/12505
+  - **openai/codex #4873, "resizing window breaks new input field background
+  styling"** (closed 2025-10-10): https://github.com/openai/codex/issues/4873
+    - This is the opposite symptom: the background is missing from blank space
+  created by wrapping on resize.
+    - The Codex maintainer said iTerm2 and Terminal.app "handle this correctly"
+  and that Ghostty and xterm.js "seem to be broken too."
+  - **kovidgoyal/kitty #9090, "background color for text disappears for empty
+  space created by resize induced wrapping"** (closed 2025-10-10):
+  https://github.com/kovidgoyal/kitty/issues/9090
+    - Same Codex case. Kovid's answer: the app "is assuming the bce … terminfo
+  property", which kitty doesn't support (see kitty #160).
+  - **xtermjs/xterm.js #5394, "Weird BG color trail with addon-fit after
+  updating to 5.5.0"** (closed as-designed 2025-09-17):
+  https://github.com/xtermjs/xterm.js/issues/5394
+    - jerch explains that xterm.js reflow copies cells only up to the last
+  non-empty cell. Trailing background-only cells to the right are dropped, which
+  matches the trimming behaviour you want.
+  - **dandavison/delta PR #515, "Add side-by-side line wrapping mode"** (merged
+  2021-10-16): https://github.com/dandavison/delta/pull/515
+    - dandavison prefers terminal-filled backgrounds so "the color will
+  expand/contract automatically" when the window is resized.
+
+  ## Searched, nothing found
+  - Ghostty issues and discussions for delta, "background color erase", bce, and
+  reflow/resize combined with background.
+  - delta issues for "ghostty".
+  - alacritty, wezterm and iTerm2 for the same reflow-vs-background-erase
+  question.
+
+⏺ Agent "Find related Ghostty issues/discussions" finished · 7m 2s
+
+⏺ The full libghostty-vt suite passes with the fix (exit 0, about 8 minutes).
+  Committing the fix:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Adding two edge-case tests as their own commit: a soft-wrapped line whose last
+  row ends in a fill, and the cursor sitting inside the fill, which checks that
+  tracked pins are safe.
+
+⏺ Update(src/terminal/Terminal.zig)
+  ⎿  Added 61 lines
+      16715      }
+      16716  }
+      16717
+      16718 +test "Terminal: resize less cols does not wrap trailing back
+            +ground erase of wrapped line" {
+      16719 +    const alloc = testing.allocator;
+      16720 +    const io_impl = testing.io;
+      16721 +    var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 4
+            + });
+      16722 +    defer t.deinit(alloc);
+      16723 +
+      16724 +    // The painted line is soft-wrapped, so the background-o
+            +nly cells are
+      16725 +    // on its last row, after the text that reflows onto it.
+      16726 +    {
+      16727 +        var s = t.vtStream();
+      16728 +        defer s.deinit();
+      16729 +        s.nextSlice("\x1b[41mabcdefg\x1b[K\x1b[0m\r\nbar");
+      16730 +    }
+      16731 +
+      16732 +    try t.resize(alloc, .{ .cols = 4, .rows = 4 });
+      16733 +
+      16734 +    {
+      16735 +        const str = try t.plainString(alloc);
+      16736 +        defer alloc.free(str);
+      16737 +        try testing.expectEqualStrings("abcd\nefg\nbar", str
+            +);
+      16738 +    }
+      16739 +
+      16740 +    const pages = &t.screens.active.pages;
+      16741 +    try testing.expect(pages.getCell(.{ .active = .{ .y = 0
+            +} }).?.row.wrap);
+      16742 +    try testing.expect(!pages.getCell(.{ .active = .{ .y = 1
+            + } }).?.row.wrap);
+      16743 +    try testing.expectEqual(
+      16744 +        .bg_color_palette,
+      16745 +        pages.getCell(.{ .active = .{ .x = 3, .y = 1 } }).?.
+            +cell.content_tag,
+      16746 +    );
+      16747 +}
+      16748 +
+      16749 +test "Terminal: resize less cols keeps trailing background e
+            +rase before cursor" {
+      16750 +    const alloc = testing.allocator;
+      16751 +    const io_impl = testing.io;
+      16752 +    var t = try init(io_impl, alloc, .{ .cols = 10, .rows =
+            +3 });
+      16753 +    defer t.deinit(alloc);
+      16754 +
+      16755 +    // The cursor is inside the background-only cells, so th
+            +e cells up to
+      16756 +    // it reflow with it (wrapping) like any other cells bef
+            +ore the cursor.
+      16757 +    {
+      16758 +        var s = t.vtStream();
+      16759 +        defer s.deinit();
+      16760 +        s.nextSlice("\x1b[41mfoo\x1b[K\x1b[0m\x1b[9G");
+      16761 +    }
+      16762 +    try testing.expectEqual(8, t.screens.active.cursor.x);
+      16763 +
+      16764 +    try t.resize(alloc, .{ .cols = 5, .rows = 3 });
+      16765 +
+      16766 +    const pages = &t.screens.active.pages;
+      16767 +    try testing.expect(pages.getCell(.{ .active = .{ .y = 0
+            +} }).?.row.wrap);
+      16768 +    try testing.expectEqual(3, t.screens.active.cursor.x);
+      16769 +    try testing.expectEqual(1, t.screens.active.cursor.y);
+      16770 +    for (0..4) |x| {
+      16771 +        const cell = pages.getCell(.{ .active = .{
+      16772 +            .x = @intCast(x),
+      16773 +            .y = 1,
+      16774 +        } }).?.cell;
+      16775 +        try testing.expectEqual(.bg_color_palette, cell.cont
+            +ent_tag);
+      16776 +    }
+      16777 +}
+      16778 +
+      16779  // https://github.com/mitchellh/ghostty/issues/723
+      16780  // This was found via fuzzing so its highly specific.
+      16781  test "Terminal: resize with left and right margin set" {
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All three pass. Next I'm checking that the wrapped-line test actually
+  exercises the fix: I'll turn off the one-line break temporarily, rerun, then
+  restore it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Confirmed the fix is necessary: both shrink tests fail without it and pass
+  with it, while the cursor test passes regardless since it checks pre-existing
+  behavior. The fix is restored, so only the test file appears in the diff—now
+  committing.
+
+  Listed 1 directory, ran 2 shell commands (ctrl+o to expand)
+
+⏺ Ghostty soft-wraps those background-only cells because of a narrow regression.
+  I found it, wrote a test that fails, and made a small fix that passes. There
+  are three commits on top of main, and the full libghostty-vt test suite
+  passes.
+
+  1. Where the code is
+
+  The erase (CSI K) with a background color set. delta paints a line as
+  ESC[48;…m, then the text, then ESC[0K. Erasing fills the cells with
+  Screen.blankCell() → Style.bgCell() (src/terminal/style.zig:230). That
+  produces cells tagged .bg_color_palette or .bg_color_rgb: a background color
+  and no text.
+
+  The resize. Changing the column count reflows every row through
+  ReflowCursor.reflowRow (src/terminal/PageList.zig:1654). Before copying a row
+  it trims trailing blank cells, and it decides what's blank with Cell.isEmpty()
+  (src/terminal/page.zig:2351). That function counts background-only cells as
+  content. That's correct for its other callers, such as scroll-clear and
+  trailing-blank-row trimming.
+
+  What goes wrong. A painted 10-column line keeps its full width of 10 cells.
+  Shrink to 5 columns and the reflow soft-wraps the leftover 5 colored cells
+  onto a new row, so one painted line becomes two. Growing never extends the
+  color: the new columns are just empty.
+
+  2. History
+
+  I checked each of these myself:
+
+  ┌────────────┬───────────┬─────────────────────────────────────────────────┐
+  │    Date    │  Commit   │                  What happened                  │
+  ├────────────┼───────────┼─────────────────────────────────────────────────┤
+  │ 2023-03-01 │ 31ac3ec7b │ Growing the window extends trailing styled      │
+  │            │           │ cells (the color follows the window)            │
+  ├────────────┼───────────┼─────────────────────────────────────────────────┤
+  │            │           │ Shrinking trims them instead of wrapping. The   │
+  │ 2023-03-01 │ 9a4a138da │ doc comment says: "This matches Terminal.app    │
+  │            │           │ behavior, which isn't strictly correct but      │
+  │            │           │ seems nice."                                    │
+  ├────────────┼───────────┼─────────────────────────────────────────────────┤
+  │            │           │ Extend-on-grow commented out: "We used to do    │
+  │ 2023-08-30 │ 3352cae3f │ have this behavior, but it broke some           │
+  │            │           │ programs." Pushed straight to main, no linked   │
+  │            │           │ issue                                           │
+  ├────────────┼───────────┼─────────────────────────────────────────────────┤
+  │ 2024-03-26 │ a416d4236 │ Old terminal deleted. Trim-on-shrink was still  │
+  │            │           │ there until this point                          │
+  └────────────┴───────────┴─────────────────────────────────────────────────┘
+
+  - What you remember: the "extend when wider" part only existed from March to
+    August 2023. The "trim when narrower" part lasted until the old terminal was
+    deleted in March 2024.
+  - The trim was never carried over to the new code. The old test Screen: resize
+    less cols trailing background colors is the only old resize test without a
+    // X "ported" marker. That looks more like an oversight than a decision, but
+    nothing records which it was.
+  - The other Claude's dates are right, but the mechanism is slightly different.
+    1d3057750 and 8589f2c0f are as described. Those commits didn't remove
+    anything, though: the new implementation simply never had the trim.
+    a416d4236 deleted the old one.
+
+  3. The fix (commit tznmlu)
+
+  The change is three small edits in reflowRow:
+
+  1. Find where the fill starts. For a row that isn't soft-wrapped, scan
+     backward over trailing background-only cells to find fill_start. A
+     soft-wrapped row is followed by more text, so all of its cells matter and
+     nothing is trimmed.
+  2. Keep tracked positions safe. Raise fill_start past any tracked position on
+     the row, including the cursor. The existing code already does the same
+     thing to cols_len two lines above. This guarantees every tracked position
+     gets remapped and none is left pointing into a freed page.
+  3. Don't wrap just for fill. When the reflow is about to soft-wrap and only
+     fill cells remain (x >= fill_start), stop. Fill cells that still fit on the
+     current row are kept.
+
+  After the stop, the reflow is in exactly the state it's in when a row's text
+  fills the new width exactly, which is an existing, well-tested path.
+
+  I deliberately didn't port the old code literally (trim cells whose index is
+  past the new width). That rule only works for a row that starts at column 0.
+  It still wraps the fill on the last row of a long, soft-wrapped line, which
+  one of the new tests covers.
+
+  Two limits to mention in the report:
+  - Narrower than the old code. It only trims erase-produced background cells.
+    Old Ghostty also trimmed styled spaces, but spaces are real text a program
+    wrote, so I left them alone.
+  - Lossy, like the old code. Shrinking and then growing back doesn't bring the
+    trimmed color back.
+
+  4. Commits
+
+  1. wtrzqv: the failing test. It feeds in delta's exact byte sequence. Without
+     the fix the screen reads foo\n\nbar, with an extra red row.
+  2. tznmlu: the fix, about 15 lines with comments.
+  3. rvonyr: two edge-case tests, one for a painted soft-wrapped line and one
+     for the cursor sitting inside the fill.
+
+  With the fix temporarily turned off, both shrink tests fail; with it on, all
+  three pass. The cursor test passes either way: it checks behavior that already
+  works and that the fix must not break. zig build test won't run on this
+  machine because Xcode's metal tool isn't installed, so I used zig build
+  test-lib-vt, which covers src/terminal.
+
+  5. Should it be fixed?
+
+  There's no spec. One maintainer has written down how Ghostty breaks ties:
+  spec, then kitty, then xterm, then common practice (#12497
+  (https://github.com/ghostty-org/ghostty/discussions/12497)). The strongest
+  argument for the report is that this was intentional behavior, with a test,
+  that got lost in the rewrite.
+
+  Ask only for the trimming. Asking for extend-on-grow means asking the
+  maintainer to undo a deliberate 2023 decision, and the reason isn't public.
+
+  I haven't checked what other terminals do today. Before filing, it's worth
+  running printf '\e[41mfoo\e[K\e[0m\n' in Terminal.app, kitty and iTerm2, then
+  narrowing each window and seeing whether the red wraps. A maintainer
+  reportedly said xterm.js trims these cells too; I didn't verify that.
+
+  A correction about delta: its help text says line-fill-method only applies in
+  side-by-side mode. Unified diffs always use the erase, so this affects
+  everyone using delta's default unified view.
+
+  6. Issues and PRs to look at
+
+  No public report of this bug turned up. The search wasn't logged in to GitHub,
+  so search Discussions for "delta", "reflow" and "wrap" yourself first.
+
+  - ghostty #83 "Resize Fixes" (https://github.com/ghostty-org/ghostty/pull/83):
+    the PR that added both behaviors in 2023. Good to cite.
+  - ghostty Discussion #12497
+    (https://github.com/ghostty-org/ghostty/discussions/12497): background-color
+    bleed after scrolling. Tangential, but it's where the precedence order
+    comes from.
+  - delta #1021 (https://github.com/dandavison/delta/issues/1021) (open): a
+    delta maintainer says unified mode can't pad with spaces because it doesn't
+    know the width, and that the erase approach "is also nice when resizing the
+    terminal."
+  - delta #115 (https://github.com/dandavison/delta/issues/115) and #512
+    (https://github.com/dandavison/delta/pull/512): why delta switched to the
+    erase approach. Your own delta #155
+    (https://github.com/dandavison/delta/issues/155) is part of that history.
+  - xterm.js #5394 (https://github.com/xtermjs/xterm.js/issues/5394): a
+    maintainer reportedly explains that xterm.js reflow drops trailing
+    background-only cells.
+  - Tangential, opposite symptom (missing color in space created by wrapping):
+    codex #4873 (https://github.com/openai/codex/issues/4873), kitty #9090
+    (https://github.com/kovidgoyal/kitty/issues/9090).
+
+  How to file it
+
+  - Open an "Issue Triage" Discussion, not an Issue (CONTRIBUTING.md).
+  - Pull requests need a "Vouch Request" first; unvouched PRs are closed
+    automatically.
+  - AI_POLICY.md applies: you must say which AI tool you used and how much, and
+    AI-written discussion text has to be reviewed and edited by you. The commits
+    carry a Co-Authored-By: Claude line, and you should still say so in the
+    discussion.
+
+  I can draft a short report for you to rewrite in your own words, or link the
+  branch, if that helps.
+
+✻ Sautéed for 17m 18s · done 9:16 PM
+
+※ recap: I'm preparing your Ghostty bug report about delta's line backgrounds soft-wrapping when the window gets narrower, and three commits (failing test, fix, edge-case tests) now pass. Next, check what Terminal.app, kitty and iTerm2 do before you open an "Issue Triage" discussion. (disable recaps in /config)
