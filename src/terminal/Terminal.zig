@@ -16715,6 +16715,67 @@ test "Terminal: resize less cols does not wrap trailing background erase" {
     }
 }
 
+test "Terminal: resize less cols does not wrap trailing background erase of wrapped line" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 4 });
+    defer t.deinit(alloc);
+
+    // The painted line is soft-wrapped, so the background-only cells are
+    // on its last row, after the text that reflows onto it.
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice("\x1b[41mabcdefg\x1b[K\x1b[0m\r\nbar");
+    }
+
+    try t.resize(alloc, .{ .cols = 4, .rows = 4 });
+
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("abcd\nefg\nbar", str);
+    }
+
+    const pages = &t.screens.active.pages;
+    try testing.expect(pages.getCell(.{ .active = .{ .y = 0 } }).?.row.wrap);
+    try testing.expect(!pages.getCell(.{ .active = .{ .y = 1 } }).?.row.wrap);
+    try testing.expectEqual(
+        .bg_color_palette,
+        pages.getCell(.{ .active = .{ .x = 3, .y = 1 } }).?.cell.content_tag,
+    );
+}
+
+test "Terminal: resize less cols keeps trailing background erase before cursor" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    // The cursor is inside the background-only cells, so the cells up to
+    // it reflow with it (wrapping) like any other cells before the cursor.
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice("\x1b[41mfoo\x1b[K\x1b[0m\x1b[9G");
+    }
+    try testing.expectEqual(8, t.screens.active.cursor.x);
+
+    try t.resize(alloc, .{ .cols = 5, .rows = 3 });
+
+    const pages = &t.screens.active.pages;
+    try testing.expect(pages.getCell(.{ .active = .{ .y = 0 } }).?.row.wrap);
+    try testing.expectEqual(3, t.screens.active.cursor.x);
+    try testing.expectEqual(1, t.screens.active.cursor.y);
+    for (0..4) |x| {
+        const cell = pages.getCell(.{ .active = .{
+            .x = @intCast(x),
+            .y = 1,
+        } }).?.cell;
+        try testing.expectEqual(.bg_color_palette, cell.content_tag);
+    }
+}
+
 // https://github.com/mitchellh/ghostty/issues/723
 // This was found via fuzzing so its highly specific.
 test "Terminal: resize with left and right margin set" {
